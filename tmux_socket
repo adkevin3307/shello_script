@@ -1,0 +1,46 @@
+#!/bin/bash
+
+function _ls()
+{
+    if [[ -e /tmp/tmux-$UID ]]; then
+        sockets=($(ls /tmp/tmux-$UID))
+
+        for socket in ${sockets[@]}; do
+            echo -e "\e[1;32m$socket\e[0m"
+
+            tmux -L $socket ls
+
+            echo ""
+        done
+    fi
+}
+
+function _rm()
+{
+    local KEY=$1
+
+    if [[ -e /tmp/tmux-$UID/$KEY ]]; then
+        echo -e "\e[1;31m/tmp/tmux-$UID/$KEY\e[0m"
+
+        rm -rf /tmp/tmux-$UID/$KEY
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        ls)
+            _ls
+
+            shift
+            ;;
+        rm)
+            _rm $2
+
+            shift
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done

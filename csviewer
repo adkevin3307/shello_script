@@ -1,0 +1,78 @@
+#!/bin/bash
+
+function HELP()
+{
+    echo -e "CSV Viewer in terminal."
+    echo -e ""
+    echo -e "\033[93mUSAGE:\033[0m"
+    echo -e "    csviewer [OPTIONS] [FILE]"
+    echo -e ""
+    echo -e "\033[93mOPTIONS:\033[0m"
+    echo -e "    \033[92m-H, --head <N>\033[0m"
+    echo -e "    \tPrint the first <N> lines to standard output."
+    echo -e "    \033[92m-T, --tail <N>\033[0m"
+    echo -e "    \tPrint the last <N> lines to standard output."
+    echo -e "    \033[92m-h, --help\033[0m"
+    echo -e "    \tPrint this help message."
+}
+
+while [[ $# -gt 0 && $1 =~ ^-  && ! $1 == "--" ]]; do
+    case $1 in
+        -h|--help)
+            HELP
+
+            exit 0
+
+            ;;
+        -H|--head)
+            COMMAND=head
+            LENGTH=$2
+
+            shift
+            shift
+            ;;
+        -T|--tail)
+            COMMAND=tail
+            LENGTH=$2
+
+            shift
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ $1 == "--" ]]; then
+    shift;
+fi
+
+FILE=$1
+
+if [[ -z $FILE || ( ! -z $COMMAND && ! $LENGTH =~ ^[0-9]+$ ) ]]; then
+    HELP
+
+    exit 0
+fi
+
+if [[ ! -e $FILE ]]; then
+    echo "File \"$FILE\" not found"
+
+    exit 0
+fi
+
+DATA=$(cat $FILE | column -s "," -t)
+TOTAL_LENGTH=$(echo "$DATA" | wc -l)
+TOTAL_LENGTH=$((TOTAL_LENGTH - 1))
+
+HEADER=$(echo "$DATA" | head -n 1)
+BODY=$(echo "$DATA" | tail -n $TOTAL_LENGTH)
+
+echo -e "\033[93m$HEADER\033[0m"
+
+if [[ -z $COMMAND ]]; then
+    echo "$BODY"
+else
+    echo "$BODY" | $COMMAND -n $LENGTH
+fi
