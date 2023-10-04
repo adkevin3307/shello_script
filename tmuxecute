@@ -1,0 +1,128 @@
+#!/bin/bash
+
+function HELP()
+{
+    echo -e "Execute COMMANDS parallelly by tmux."
+    echo -e ""
+    echo -e "\033[93mUSAGE:\033[0m"
+    echo -e "    tmuxecute [OPTIONS] [COMMANDS]"
+    echo -e ""
+    echo -e "\033[93mOPTIONS:\033[0m"
+    echo -e "    \033[92m-f, --file <FILE>\033[0m"
+    echo -e "    \tRead execute COMMANDS from <FILE>, one COMMAND per line."
+    echo -e "    \033[92m-m, --monitor <MONITOR COMMAND>\033[0m"
+    echo -e "    \tSet monitor command with <MONITOR COMMAND>."
+    echo -e "    \033[92m-h, --help\033[0m"
+    echo -e "    \tPrint this help message."
+}
+
+function EXECUTE()
+{
+    PANE_INDEX="$1"
+    COMMAND="$2"
+
+    sleep 0.1
+    tmux select-pane -t "$PANE_INDEX"
+    tmux send "$COMMAND" ENTER
+}
+
+while [[ $# -gt 0 && $1 =~ ^-  && ! $1 == "--" ]]; do
+    case $1 in
+        -h|--help)
+            HELP
+
+            exit 0
+
+            ;;
+        -f|--file)
+            FILE=$2
+
+            shift
+            shift
+            ;;
+        -m|--monitor)
+            MONITOR=$2
+
+            shift
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ $1 == "--" ]]; then
+    shift;
+fi
+
+HOST=TMUXECUTE
+
+COMMANDS=()
+
+INDEX=0
+WINDOW_INDEX=0
+
+if [[ ! -z "$FILE" ]]; then
+    if [[ ! -e "$FILE" ]]; then
+        HELP
+
+        exit 0
+    fi
+
+    IFS=$'\n' read -d '' -r -a COMMANDS < "$FILE"
+else
+    for ELEMENT in "$@"; do
+        COMMANDS+=("$ELEMENT")
+    done
+fi
+
+if [[ -z "$MONITOR" ]]; then
+    MONITOR="echo -e \"\033[92mHello World\033[0m\""
+fi
+
+if [[ -n "$(tmux ls | grep $HOST)" ]]; then
+    echo -e "\033[91mThe $HOST already exists, KILL IT.\033[0m"
+
+    tmux kill-session -t $HOST
+fi
+
+tmux new-session -d -s $HOST
+
+for COMMAND in "${COMMANDS[@]}"; do
+    if [[ "$INDEX" == "0" ]]; then
+        tmux select-window -t "$WINDOW_INDEX"
+        tmux split-window -h
+
+        tmux select-pane -t 0
+        tmux split-window -v
+
+        tmux select-pane -t 2
+        tmux split-window -v
+    fi
+
+    EXECUTE "$INDEX" "$COMMAND"
+
+    INDEX=$((INDEX + 1))
+
+    if [[ "$INDEX" == "4" ]]; then
+        INDEX=0
+        WINDOW_INDEX=$((WINDOW_INDEX + 1))
+
+        tmux new-window
+    fi
+done
+
+if [[ "$INDEX" != "0" ]]; then
+    WINDOW_INDEX=$((WINDOW_INDEX + 1))
+
+    tmux new-window
+fi
+
+tmux select-window -t "$WINDOW_INDEX"
+tmux split-window -h
+
+EXECUTE 0 "htop"
+EXECUTE 1 "$MONITOR"
+
+tmux attach-session -t $HOST
