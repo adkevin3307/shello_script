@@ -34,6 +34,12 @@ while [[ $# -gt 0 && $1 =~ ^-  && ! $1 == "--" ]]; do
             exit 0
 
             ;;
+        -n|--name)
+            HOST=$2
+
+            shift
+            shift
+            ;;
         -f|--file)
             FILE=$2
 
@@ -56,12 +62,14 @@ if [[ $1 == "--" ]]; then
     shift;
 fi
 
-HOST=TMUXECUTE
-
 COMMANDS=()
 
 INDEX=0
 WINDOW_INDEX=0
+
+if [[ -z "$HOST" ]]; then
+    HOST=TMUXECUTE
+fi
 
 if [[ ! -z "$FILE" ]]; then
     if [[ ! -e "$FILE" ]]; then
@@ -81,7 +89,7 @@ if [[ -z "$MONITOR" ]]; then
     MONITOR="echo -e \"\033[92mHello World\033[0m\""
 fi
 
-if [[ -n "$(tmux ls | grep $HOST)" ]]; then
+if [[ -n "$(tmux ls | grep -w $HOST)" ]]; then
     echo -e "\033[91mThe $HOST already exists, KILL IT.\033[0m"
 
     tmux kill-session -t $HOST
