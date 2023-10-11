@@ -8,6 +8,8 @@ function HELP()
     echo -e "    tmuxecute [OPTIONS] [COMMANDS]"
     echo -e ""
     echo -e "\033[93mOPTIONS:\033[0m"
+    echo -e "    \033[92m-n, --name <NAME>\033[0m"
+    echo -e "    \tSpecific tmux session name by <NAME>."
     echo -e "    \033[92m-f, --file <FILE>\033[0m"
     echo -e "    \tRead execute COMMANDS from <FILE>, one COMMAND per line."
     echo -e "    \033[92m-m, --monitor <MONITOR COMMAND>\033[0m"
