@@ -12,8 +12,6 @@ function HELP()
     echo -e "    \tSpecific tmux session name by <NAME>."
     echo -e "    \033[92m-f, --file <FILE>\033[0m"
     echo -e "    \tRead execute COMMANDS from <FILE>, one COMMAND per line."
-    echo -e "    \033[92m-m, --monitor <MONITOR COMMAND>\033[0m"
-    echo -e "    \tSet monitor command with <MONITOR COMMAND>."
     echo -e "    \033[92m-h, --help\033[0m"
     echo -e "    \tPrint this help message."
 }
@@ -23,9 +21,10 @@ function EXECUTE()
     PANE_INDEX="$1"
     COMMAND="$2"
 
-    sleep 0.1
+    sleep 0.0
     tmux select-pane -t "$PANE_INDEX"
     tmux send "$COMMAND" ENTER
+    tmux send ENTER
 }
 
 while [[ $# -gt 0 && $1 =~ ^-  && ! $1 == "--" ]]; do
@@ -44,12 +43,6 @@ while [[ $# -gt 0 && $1 =~ ^-  && ! $1 == "--" ]]; do
             ;;
         -f|--file)
             FILE=$2
-
-            shift
-            shift
-            ;;
-        -m|--monitor)
-            MONITOR=$2
 
             shift
             shift
@@ -87,10 +80,6 @@ else
     done
 fi
 
-if [[ -z "$MONITOR" ]]; then
-    MONITOR="echo -e \"\033[92mHello World\033[0m\""
-fi
-
 if [[ -n "$(tmux ls | grep -w $HOST)" ]]; then
     echo -e "\033[91mThe $HOST already exists, KILL IT.\033[0m"
 
@@ -100,6 +89,12 @@ fi
 tmux new-session -d -s $HOST
 
 for COMMAND in "${COMMANDS[@]}"; do
+    COMMAND=$(echo $COMMAND | awk '{$1=$1;print}')
+
+    if [[ "$COMMAND" == "#*" ]]; then
+        continue
+    fi
+
     if [[ "$INDEX" == "0" ]]; then
         tmux select-window -t "$WINDOW_INDEX"
         tmux split-window -h
@@ -122,17 +117,5 @@ for COMMAND in "${COMMANDS[@]}"; do
         tmux new-window
     fi
 done
-
-if [[ "$INDEX" != "0" ]]; then
-    WINDOW_INDEX=$((WINDOW_INDEX + 1))
-
-    tmux new-window
-fi
-
-tmux select-window -t "$WINDOW_INDEX"
-tmux split-window -h
-
-EXECUTE 0 "htop"
-EXECUTE 1 "$MONITOR"
 
 tmux attach-session -t $HOST
