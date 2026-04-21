@@ -1,0 +1,3 @@
+#!/bin/bash
+
+cat $1 | grep -v '^$' | sed 's/^/--build-arg /g' | paste -s -d ' '
