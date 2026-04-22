@@ -18,6 +18,8 @@ function HELP() {
     echo -e "    \tSpecific id by <ID>. Default: \`id -un\`."
     echo -e "    \033[92m--project <PROJECT>\033[0m"
     echo -e "    \tSpecific project name by <PROJECT>. Default: \"project\"."
+    echo -e "    \033[92m--version <VERSION>\033[0m"
+    echo -e "    \tSpecific version by <VERSION>. Default: \"latest\"."
     echo -e "    \033[92m--ssh\033[0m"
     echo -e "    \tEstablish SSH agent."
     echo -e "    \033[92m--compose\033[0m"
