@@ -49,6 +49,12 @@ while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do
         shift
         shift
         ;;
+    --version)
+        VERSION=$2
+
+        shift
+        shift
+        ;;
     --ssh)
         SSH=1
 
@@ -85,6 +91,12 @@ if [[ -z ${PROJECT} ]]; then
     echo "Set default project to ${PROJECT} ..."
 fi
 
+if [[ -z ${VERSION} ]]; then
+    VERSION="version"
+
+    echo "Set default version to ${VERSION} ..."
+fi
+
 if [[ ${SSH} == 1 ]]; then
     trap handler SIGINT
 
@@ -92,9 +104,9 @@ if [[ ${SSH} == 1 ]]; then
 fi
 
 if [[ ${COMPOSE} == 1 ]]; then
-    ID=${ID} PROJECT=${PROJECT} bash -c "docker compose $*"
+    ID=${ID} PROJECT=${PROJECT} VERSION=${VERSION} bash -c "docker compose $*"
 else
-    ID=${ID} PROJECT=${PROJECT} bash -c "docker $*"
+    ID=${ID} PROJECT=${PROJECT} VERSION=${VERSION} bash -c "docker $*"
 fi
 
 if [[ ${SSH} == 1 ]]; then
