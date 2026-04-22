@@ -94,7 +94,7 @@ if [[ -z ${PROJECT} ]]; then
 fi
 
 if [[ -z ${VERSION} ]]; then
-    VERSION="version"
+    VERSION="latest"
 
     echo "Set default version to ${VERSION} ..."
 fi
