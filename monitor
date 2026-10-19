@@ -1,0 +1,3 @@
+#!/bin/bash
+
+viddy --disable_auto_save --skip-empty-diffs $@
