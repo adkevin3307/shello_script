@@ -1,0 +1,515 @@
+#!/bin/bash
+
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+PROJECTS_DIR="${CLAUDE_DIR}/projects"
+
+function HELP() {
+    echo -e "Manage Claude Code sessions."
+    echo -e ""
+    echo -e "\033[93mUSAGE:\033[0m"
+    echo -e "    claude-session <COMMAND> [OPTIONS] [ARGS]"
+    echo -e ""
+    echo -e "\033[93mCOMMANDS:\033[0m"
+    echo -e "    \033[92mlist, ls [--here] [--limit <N>]\033[0m"
+    echo -e "    \tList sessions, newest first. --here only shows sessions started in the current directory."
+    echo -e "    \033[92mshow [ID]\033[0m"
+    echo -e "    \tShow session metadata and its conversation (user prompts and assistant text)."
+    echo -e "    \033[92mcreate, new [--name <NAME>] [--dir <DIR>] [-- CLAUDE OPTIONS]\033[0m"
+    echo -e "    \tStart a new session with a fresh session id."
+    echo -e "    \033[92mresume [ID] [-- CLAUDE OPTIONS]\033[0m"
+    echo -e "    \tResume a session in the directory it was started in."
+    echo -e "    \033[92mfork [ID] [-- CLAUDE OPTIONS]\033[0m"
+    echo -e "    \tResume a session as a new copy (new session id)."
+    echo -e "    \033[92mrename [ID] <NAME>\033[0m"
+    echo -e "    \tSet the session title."
+    echo -e "    \033[92mdelete, rm [-y] [--history] [ID...]\033[0m"
+    echo -e "    \tDelete sessions and their side data. -y skips confirmation,"
+    echo -e "    \t--history also removes their entries from the prompt history."
+    echo -e ""
+    echo -e "    ID may be a unique prefix of the session id. If ID is omitted, pick one with fzf."
+    echo -e ""
+    echo -e "\033[93mOPTIONS:\033[0m"
+    echo -e "    \033[92m-h, --help\033[0m"
+    echo -e "    \tPrint this help message."
+}
+
+function ERROR() {
+    echo -e "\033[91m$*\033[0m" >&2
+}
+
+function require() {
+    for CMD in "$@"; do
+        if ! command -v "${CMD}" > /dev/null; then
+            ERROR "Command ${CMD} not found."
+
+            exit 1
+        fi
+    done
+}
+
+# All session files, newest first.
+function session_files() {
+    find "${PROJECTS_DIR}" -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@ %p\n' 2> /dev/null |
+        sort -rn |
+        cut -d' ' -f2-
+}
+
+function session_cwd() {
+    grep -m1 '"cwd":' "$1" | jq -r '.cwd // empty'
+}
+
+function session_title() {
+    local FILE="$1"
+    local ID
+    ID="$(basename "${FILE}" .jsonl)"
+    local TITLE=""
+
+    if [[ -f "${FILE%.jsonl}/custom-title.json" ]]; then
+        TITLE="$(jq -r '.customTitle // empty' "${FILE%.jsonl}/custom-title.json")"
+    fi
+
+    if [[ -z "${TITLE}" ]]; then
+        TITLE="$(grep '"type":"custom-title"' "${FILE}" | tail -n1 | jq -r '.customTitle // empty')"
+    fi
+
+    if [[ -z "${TITLE}" ]]; then
+        TITLE="$(grep '"type":"ai-title"' "${FILE}" | tail -n1 | jq -r '.aiTitle // empty')"
+    fi
+
+    if [[ -z "${TITLE}" ]]; then
+        TITLE="$(grep '"type":"user"' "${FILE}" |
+            jq -r 'select(.message.content | type == "string" and (startswith("<") | not)) | .message.content' 2> /dev/null |
+            head -n1 | tr '\n' ' ' | cut -c1-60)"
+    fi
+
+    echo "${TITLE:-(untitled)}"
+}
+
+function session_prompts() {
+    grep '"type":"user"' "$1" | jq -r 'select(.message.content | type == "string" and (startswith("<") | not)) | 1' 2> /dev/null | wc -l
+}
+
+# Print the pid of the live process using the session, if any.
+function session_pid() {
+    local ID="$1"
+    local PID_FILE PID START
+
+    for PID_FILE in "${CLAUDE_DIR}"/sessions/*.json; do
+        [[ -f "${PID_FILE}" ]] || continue
+
+        read -r PID START < <(jq -r --arg id "${ID}" 'select(.sessionId == $id) | "\(.pid) \(.procStart // "")"' "${PID_FILE}" 2> /dev/null)
+
+        [[ -n "${PID}" ]] && kill -0 "${PID}" 2> /dev/null || continue
+
+        # Guard against a reused pid.
+        if [[ -n "${START}" && -r "/proc/${PID}/stat" && "$(awk '{print $22}' "/proc/${PID}/stat")" != "${START}" ]]; then
+            continue
+        fi
+
+        echo "${PID}"
+
+        return 0
+    done
+
+    return 1
+}
+
+function pick_session() {
+    require fzf
+
+    local LINE
+    # --tmux opens a popup inside tmux and falls back to the normal layout outside it
+    LINE="$(
+        cmd_list | fzf \
+            --tmux 80%,90% \
+            --no-bold \
+            --no-sort \
+            --ansi \
+            --border-label ' claude-session ' \
+            --prompt '> ' \
+            --header-lines 1 \
+            --bind 'tab:down,shift-tab:up' \
+            --preview-window 'down:60%' \
+            --preview "\"${SELF}\" show {1}"
+    )"
+
+    [[ -n "${LINE}" ]] || exit 1
+
+    awk '{print $1}' <<< "${LINE}"
+}
+
+# Resolve an id (or prefix) to its jsonl file. Picks interactively when empty.
+function resolve_session() {
+    local ID="$1"
+
+    if [[ -z "${ID}" ]]; then
+        ID="$(pick_session)" || exit 1
+    fi
+
+    local MATCHES=()
+    mapfile -t MATCHES < <(find "${PROJECTS_DIR}" -mindepth 2 -maxdepth 2 -name "${ID}*.jsonl" 2> /dev/null)
+
+    if [[ ${#MATCHES[@]} -eq 0 ]]; then
+        ERROR "Session ${ID} not found."
+
+        exit 1
+    fi
+
+    if [[ ${#MATCHES[@]} -gt 1 ]]; then
+        ERROR "Session id ${ID} is ambiguous:"
+
+        for MATCH in "${MATCHES[@]}"; do
+            basename "${MATCH}" .jsonl >&2
+        done
+
+        exit 1
+    fi
+
+    echo "${MATCHES[0]}"
+}
+
+function cmd_list() {
+    local HERE=0
+    local LIMIT=0
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        --here)
+            HERE=1
+
+            shift
+            ;;
+        -n | --limit)
+            LIMIT=$2
+
+            shift
+            shift
+            ;;
+        *)
+            ERROR "Option $1 not found."
+
+            exit 1
+            ;;
+        esac
+    done
+
+    local COUNT=0
+
+    printf '%-36s  %-16s  %5s  %-3s  %-40s  %s\n' "ID" "MODIFIED" "MSGS" "RUN" "DIRECTORY" "TITLE"
+
+    while read -r FILE; do
+        local ID CWD
+        ID="$(basename "${FILE}" .jsonl)"
+        CWD="$(session_cwd "${FILE}")"
+
+        if [[ ${HERE} == 1 && "${CWD}" != "${PWD}" ]]; then
+            continue
+        fi
+
+        local RUN=""
+        session_pid "${ID}" > /dev/null && RUN="*"
+
+        printf '%-36s  %-16s  %5s  %-3s  %-40s  %s\n' \
+            "${ID}" \
+            "$(date -d "@$(stat -c %Y "${FILE}")" '+%Y-%m-%d %H:%M')" \
+            "$(session_prompts "${FILE}")" \
+            "${RUN}" \
+            "${CWD/#${HOME}/\~}" \
+            "$(session_title "${FILE}")"
+
+        COUNT=$((COUNT + 1))
+
+        if [[ ${LIMIT} -gt 0 && ${COUNT} -ge ${LIMIT} ]]; then
+            break
+        fi
+    done < <(session_files)
+}
+
+function cmd_show() {
+    local FILE ID PID
+    FILE="$(resolve_session "$1")" || exit 1
+    ID="$(basename "${FILE}" .jsonl)"
+
+    echo -e "\033[93mID:\033[0m        ${ID}"
+    echo -e "\033[93mTitle:\033[0m     $(session_title "${FILE}")"
+    echo -e "\033[93mDirectory:\033[0m $(session_cwd "${FILE}")"
+    echo -e "\033[93mBranch:\033[0m    $(grep -m1 '"gitBranch":' "${FILE}" | jq -r '.gitBranch // empty')"
+    echo -e "\033[93mStarted:\033[0m   $(grep -m1 '"type":"user"' "${FILE}" | jq -r '.timestamp // empty')"
+    echo -e "\033[93mModified:\033[0m  $(date -d "@$(stat -c %Y "${FILE}")" '+%Y-%m-%d %H:%M:%S')"
+    echo -e "\033[93mPrompts:\033[0m   $(session_prompts "${FILE}")"
+    echo -e "\033[93mSize:\033[0m      $(du -sh "${FILE}" | cut -f1)"
+    echo -e "\033[93mFile:\033[0m      ${FILE}"
+
+    if PID="$(session_pid "${ID}")"; then
+        echo -e "\033[93mRunning:\033[0m   pid ${PID}"
+    fi
+
+    echo ""
+
+    jq -r '
+        if .type == "user" and (.message.content | type == "string") then
+            "\u001b[92m> " + .message.content + "\u001b[0m\n"
+        elif .type == "assistant" then
+            ([.message.content[]? | select(.type == "text") | .text] | join("\n")) as $text
+            | if $text == "" then empty else $text + "\n" end
+        else
+            empty
+        end
+    ' "${FILE}" 2> /dev/null
+}
+
+function cmd_create() {
+    local NAME=""
+    local DIR="${PWD}"
+
+    while [[ $# -gt 0 && ! "$1" == "--" ]]; do
+        case $1 in
+        -n | --name)
+            NAME=$2
+
+            shift
+            shift
+            ;;
+        -d | --dir)
+            DIR=$2
+
+            shift
+            shift
+            ;;
+        *)
+            ERROR "Option $1 not found."
+
+            exit 1
+            ;;
+        esac
+    done
+
+    if [[ "$1" == "--" ]]; then
+        shift
+    fi
+
+    local ID ARGS
+    ID="$(cat /proc/sys/kernel/random/uuid 2> /dev/null || uuidgen)"
+    ARGS=(--session-id "${ID}")
+
+    if [[ -n "${NAME}" ]]; then
+        ARGS+=(--name "${NAME}")
+    fi
+
+    cd "${DIR}" || exit 1
+
+    echo "Creating session ${ID} in ${PWD} ..."
+
+    exec claude "${ARGS[@]}" "$@"
+}
+
+function cmd_resume() {
+    local FORK="$1"
+    shift
+
+    local ID=""
+
+    if [[ $# -gt 0 && ! "$1" == "--" ]]; then
+        ID=$1
+
+        shift
+    fi
+
+    if [[ "$1" == "--" ]]; then
+        shift
+    fi
+
+    local FILE CWD
+    FILE="$(resolve_session "${ID}")" || exit 1
+    ID="$(basename "${FILE}" .jsonl)"
+    CWD="$(session_cwd "${FILE}")"
+
+    if [[ -n "${CWD}" && -d "${CWD}" ]]; then
+        cd "${CWD}" || exit 1
+    elif [[ -n "${CWD}" ]]; then
+        ERROR "Directory ${CWD} no longer exists, resuming from ${PWD}."
+    fi
+
+    if [[ ${FORK} == 1 ]]; then
+        exec claude --resume "${ID}" --fork-session "$@"
+    fi
+
+    exec claude --resume "${ID}" "$@"
+}
+
+function cmd_rename() {
+    local ID="" NAME=""
+
+    if [[ $# -ge 2 ]]; then
+        ID=$1
+        NAME=$2
+    else
+        NAME=$1
+    fi
+
+    if [[ -z "${NAME}" ]]; then
+        ERROR "Missing <NAME>."
+
+        exit 1
+    fi
+
+    local FILE
+    FILE="$(resolve_session "${ID}")" || exit 1
+    ID="$(basename "${FILE}" .jsonl)"
+
+    if session_pid "${ID}" > /dev/null; then
+        ERROR "Session ${ID} is running; it may overwrite the new title. Use /rename inside it instead."
+    fi
+
+    mkdir -p "${FILE%.jsonl}"
+    jq -nc --arg t "${NAME}" '{customTitle: $t}' > "${FILE%.jsonl}/custom-title.json"
+    jq -nc --arg t "${NAME}" --arg id "${ID}" '{type: "custom-title", customTitle: $t, sessionId: $id}' >> "${FILE}"
+
+    echo "Renamed ${ID} to \"${NAME}\"."
+}
+
+function cmd_delete() {
+    local YES=0
+    local HISTORY=0
+    local IDS=()
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        -y | --yes)
+            YES=1
+
+            shift
+            ;;
+        --history)
+            HISTORY=1
+
+            shift
+            ;;
+        -*)
+            ERROR "Option $1 not found."
+
+            exit 1
+            ;;
+        *)
+            IDS+=("$1")
+
+            shift
+            ;;
+        esac
+    done
+
+    if [[ ${#IDS[@]} -eq 0 ]]; then
+        IDS=("")
+    fi
+
+    local FILES=()
+
+    for ID in "${IDS[@]}"; do
+        local FILE
+        FILE="$(resolve_session "${ID}")" || exit 1
+        ID="$(basename "${FILE}" .jsonl)"
+
+        if session_pid "${ID}" > /dev/null; then
+            ERROR "Session ${ID} is running, skip it."
+
+            continue
+        fi
+
+        FILES+=("${FILE}")
+    done
+
+    [[ ${#FILES[@]} -gt 0 ]] || exit 1
+
+    if [[ ${YES} == 0 ]]; then
+        local HEADER="Delete the following sessions?"
+
+        for FILE in "${FILES[@]}"; do
+            HEADER+=$'\n'"    $(basename "${FILE}" .jsonl | cut -c1-8)  $(session_title "${FILE}")"
+        done
+
+        local ANSWER
+
+        if command -v fzf > /dev/null; then
+            # border + header + 2 options + prompt, grows with the number of sessions
+            ANSWER="$(
+                printf 'No\nYes\n' | fzf \
+                    --tmux "60%,$((${#FILES[@]} + 8))" \
+                    --no-bold \
+                    --no-sort \
+                    --ansi \
+                    --border-label ' claude-session ' \
+                    --prompt '> ' \
+                    --no-info \
+                    --header "${HEADER}" \
+                    --bind 'tab:down,shift-tab:up'
+            )"
+        else
+            echo "${HEADER}"
+            read -r -p "Continue? [y/N] " ANSWER
+        fi
+
+        [[ "${ANSWER}" =~ ^([Yy]|Yes)$ ]] || exit 1
+    fi
+
+    for FILE in "${FILES[@]}"; do
+        local ID
+        ID="$(basename "${FILE}" .jsonl)"
+
+        rm -rf -- "${FILE}" "${FILE%.jsonl}" \
+            "${CLAUDE_DIR}/file-history/${ID}" \
+            "${CLAUDE_DIR}/session-env/${ID}"
+        rm -f -- "${CLAUDE_DIR}"/todos/"${ID}"*.json
+
+        if [[ ${HISTORY} == 1 && -f "${CLAUDE_DIR}/history.jsonl" ]]; then
+            local TMP
+            TMP="$(mktemp "${CLAUDE_DIR}/history.jsonl.XXXXXX")"
+
+            jq -c --arg id "${ID}" 'select(.sessionId != $id)' "${CLAUDE_DIR}/history.jsonl" > "${TMP}" &&
+                mv -- "${TMP}" "${CLAUDE_DIR}/history.jsonl"
+        fi
+
+        echo "Deleted ${ID}."
+    done
+}
+
+require jq
+
+COMMAND="$1"
+shift
+
+case ${COMMAND} in
+list | ls)
+    cmd_list "$@"
+    ;;
+show | cat)
+    cmd_show "$@"
+    ;;
+create | new)
+    require claude
+    cmd_create "$@"
+    ;;
+resume)
+    require claude
+    cmd_resume 0 "$@"
+    ;;
+fork)
+    require claude
+    cmd_resume 1 "$@"
+    ;;
+rename | mv)
+    cmd_rename "$@"
+    ;;
+delete | rm)
+    cmd_delete "$@"
+    ;;
+"" | -h | --help | help)
+    HELP
+    ;;
+*)
+    ERROR "Command ${COMMAND} not found."
+    echo -e "Please check [-h|--help] for more details."
+
+    exit 1
+    ;;
+esac
