@@ -115,6 +115,37 @@ function session_pid() {
     return 1
 }
 
+# Columns the text takes in the terminal, wide characters take 2.
+function display_width() {
+    if [[ "$1" != *[![:ascii:]]* ]]; then
+        echo "${#1}"
+    else
+        printf '%s' "$1" | wc -L
+    fi
+}
+
+# Truncate TEXT to WIDTH columns with "...", then pad it with spaces to WIDTH.
+function fit() {
+    local WIDTH="$1" TEXT="$2" LENGTH
+
+    LENGTH="$(display_width "${TEXT}")"
+
+    if [[ ${LENGTH} -gt ${WIDTH} ]]; then
+        TEXT="${TEXT:0:$((WIDTH - 3))}"
+        LENGTH="$(display_width "${TEXT}")"
+
+        while [[ ${LENGTH} -gt $((WIDTH - 3)) ]]; do
+            TEXT="${TEXT:0:-1}"
+            LENGTH="$(display_width "${TEXT}")"
+        done
+
+        TEXT+="..."
+        LENGTH=$((LENGTH + 3))
+    fi
+
+    printf '%s%*s' "${TEXT}" $((WIDTH - LENGTH)) ''
+}
+
 function pick_session() {
     require fzf
 
@@ -422,27 +453,46 @@ function cmd_delete() {
     [[ ${#FILES[@]} -gt 0 ]] || exit 1
 
     if [[ ${YES} == 0 ]]; then
-        local HEADER="Delete the following sessions?"
+        local HEADER="Delete the following sessions?"$'\n'
+        local WIDTH=40
 
         for FILE in "${FILES[@]}"; do
-            HEADER+=$'\n'"    $(basename "${FILE}" .jsonl | cut -c1-8)  $(session_title "${FILE}")"
+            local TITLE LINE LENGTH
+            TITLE="$(session_title "${FILE}")"
+
+            if [[ "$(display_width "${TITLE}")" -gt 60 ]]; then
+                TITLE="$(fit 60 "${TITLE}")"
+            fi
+
+            LINE="  $(basename "${FILE}" .jsonl | cut -c1-8)  ${TITLE}"
+            LENGTH="$(display_width "${LINE}")"
+            HEADER+=$'\n'"${LINE}"
+
+            if [[ $((LENGTH + 12)) -gt ${WIDTH} ]]; then
+                WIDTH=$((LENGTH + 12))
+            fi
         done
 
         local ANSWER
 
         if command -v fzf > /dev/null; then
-            # border + header + 2 options + prompt, grows with the number of sessions
+            # height: popup border 2 + fzf border 2 + header (question, blank, sessions) + separator 1 + 2 options
             ANSWER="$(
                 printf 'No\nYes\n' | fzf \
-                    --tmux "60%,$((${#FILES[@]} + 8))" \
+                    --tmux "${WIDTH},$((${#FILES[@]} + 9))" \
                     --no-bold \
                     --no-sort \
                     --ansi \
                     --border-label ' claude-session ' \
-                    --prompt '> ' \
+                    --layout reverse \
+                    --no-input \
                     --no-info \
                     --header "${HEADER}" \
-                    --bind 'tab:down,shift-tab:up'
+                    --header-border line \
+                    --pointer '▶' \
+                    --gutter ' ' \
+                    --bind 'tab:down,shift-tab:up' \
+                    --bind 'y:pos(2)+accept,n:pos(1)+accept'
             )"
         else
             echo "${HEADER}"
