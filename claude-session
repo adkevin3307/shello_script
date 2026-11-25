@@ -79,9 +79,12 @@ function session_title() {
 
     if [[ -z "${TITLE}" ]]; then
         TITLE="$(grep '"type":"user"' "${FILE}" |
-            jq -r 'select(.message.content | type == "string" and (startswith("<") | not)) | .message.content' 2> /dev/null |
-            head -n1 | tr '\n' ' ' | cut -c1-60)"
+            jq -r 'select(.message.content | type == "string" and (startswith("<") | not)) | .message.content | gsub("\\s+"; " ") | .[0:60]' 2> /dev/null |
+            head -n1)"
     fi
+
+    # tabs and newlines would break the rows of list and picker
+    TITLE="${TITLE//[$'\t\n']/ }"
 
     echo "${TITLE:-(untitled)}"
 }
@@ -90,15 +93,14 @@ function session_prompts() {
     grep '"type":"user"' "$1" | jq -r 'select(.message.content | type == "string" and (startswith("<") | not)) | 1' 2> /dev/null | wc -l
 }
 
-# Print the pid of the live process using the session, if any.
-function session_pid() {
-    local ID="$1"
-    local PID_FILE PID START
+# Print "<session id> <pid>" for every live Claude process.
+function live_sessions() {
+    local PID_FILE ID PID START
 
     for PID_FILE in "${CLAUDE_DIR}"/sessions/*.json; do
         [[ -f "${PID_FILE}" ]] || continue
 
-        read -r PID START < <(jq -r --arg id "${ID}" 'select(.sessionId == $id) | "\(.pid) \(.procStart // "")"' "${PID_FILE}" 2> /dev/null)
+        read -r ID PID START < <(jq -r '"\(.sessionId) \(.pid) \(.procStart // "")"' "${PID_FILE}" 2> /dev/null)
 
         [[ -n "${PID}" ]] && kill -0 "${PID}" 2> /dev/null || continue
 
@@ -107,12 +109,44 @@ function session_pid() {
             continue
         fi
 
-        echo "${PID}"
-
-        return 0
+        echo "${ID} ${PID}"
     done
+}
 
-    return 1
+# Print the pid of the live process using the session, if any.
+function session_pid() {
+    live_sessions | awk -v id="$1" '$1 == id { print $2; found = 1; exit } END { exit !found }'
+}
+
+# Print one row per session, newest first, fields separated by \x1f:
+# id, mtime, prompts, running (0/1), directory, title.
+function session_rows() {
+    local HERE="$1"
+    local RUNNING FILE
+
+    RUNNING=" $(live_sessions | cut -d' ' -f1 | tr '\n' ' ')"
+
+    while read -r FILE; do
+        local ID CWD RUN=0
+        ID="$(basename "${FILE}" .jsonl)"
+        CWD="$(session_cwd "${FILE}")"
+
+        if [[ ${HERE} == 1 && "${CWD}" != "${PWD}" ]]; then
+            continue
+        fi
+
+        if [[ "${RUNNING}" == *" ${ID} "* ]]; then
+            RUN=1
+        fi
+
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+            "${ID}" \
+            "$(stat -c %Y "${FILE}")" \
+            "$(session_prompts "${FILE}")" \
+            "${RUN}" \
+            "${CWD}" \
+            "$(session_title "${FILE}")"
+    done < <(session_files)
 }
 
 # Columns the text takes in the terminal, wide characters take 2.
@@ -146,28 +180,129 @@ function fit() {
     printf '%s%*s' "${TEXT}" $((WIDTH - LENGTH)) ''
 }
 
+# Print picker rows "<id>\t<line>", the line fits in WIDTH columns like `ls -l` in telescope file browser:
+# running mark, title, project, prompts and modified time (year instead of time when older than six months).
+function picker_rows() {
+    local WIDTH="$1"
+    local GREEN=$'\033[92m' BLUE=$'\033[94m' RESET=$'\033[0m'
+    local IDS=() MTIMES=() PROMPTS=() RUNS=() PROJECTS=() TITLES=()
+    local ID MTIME PROMPT RUN CWD TITLE PROJECT
+
+    while IFS=$'\x1f' read -r ID MTIME PROMPT RUN CWD TITLE; do
+        IDS+=("${ID}")
+        MTIMES+=("${MTIME}")
+        PROMPTS+=("${PROMPT}")
+        RUNS+=("${RUN}")
+        PROJECT="${CWD##*/}"
+        PROJECTS+=("${PROJECT:-${CWD:-?}}")
+        TITLES+=("${TITLE}")
+    done < <(session_rows 0)
+
+    # width of project (at most 16) and prompts columns
+    local PROJECT_WIDTH=0 PROMPT_WIDTH=1 I
+
+    for I in "${!IDS[@]}"; do
+        local LENGTH
+        LENGTH="$(display_width "${PROJECTS[I]}")"
+
+        if [[ ${LENGTH} -gt ${PROJECT_WIDTH} ]]; then
+            PROJECT_WIDTH=${LENGTH}
+        fi
+
+        if [[ ${#PROMPTS[I]} -gt ${PROMPT_WIDTH} ]]; then
+            PROMPT_WIDTH=${#PROMPTS[I]}
+        fi
+    done
+
+    if [[ ${PROJECT_WIDTH} -gt 16 ]]; then
+        PROJECT_WIDTH=16
+    fi
+
+    # mark 1, time 12 and 4 separators take 17 columns, drop the project column (and its separator) when the title gets too short
+    local TITLE_WIDTH=$((WIDTH - 17 - PROMPT_WIDTH - PROJECT_WIDTH))
+
+    if [[ ${TITLE_WIDTH} -lt 12 ]]; then
+        PROJECT_WIDTH=0
+        TITLE_WIDTH=$((WIDTH - 16 - PROMPT_WIDTH))
+    fi
+
+    if [[ ${TITLE_WIDTH} -lt 4 ]]; then
+        TITLE_WIDTH=4
+    fi
+
+    local NOW
+    printf -v NOW '%(%s)T' -1
+
+    for I in "${!IDS[@]}"; do
+        local MARK=" " TIME
+        PROJECT=""
+
+        if [[ ${RUNS[I]} == 1 ]]; then
+            MARK="●"
+        fi
+
+        if [[ ${PROJECT_WIDTH} -gt 0 ]]; then
+            PROJECT=" ${GREEN}$(fit "${PROJECT_WIDTH}" "${PROJECTS[I]}")${RESET}"
+        fi
+
+        if [[ $((NOW - MTIMES[I])) -lt 15768000 ]]; then
+            printf -v TIME '%(%b %e %H:%M)T' "${MTIMES[I]}"
+        else
+            printf -v TIME '%(%b %e  %Y)T' "${MTIMES[I]}"
+        fi
+
+        printf '%s\t%s %s%s %s%*s %s%s\n' \
+            "${IDS[I]}" \
+            "${GREEN}${MARK}${RESET}" \
+            "${BLUE}$(fit "${TITLE_WIDTH}" "${TITLES[I]}")${RESET}" \
+            "${PROJECT}" \
+            "${BLUE}" "${PROMPT_WIDTH}" "${PROMPTS[I]}" \
+            "${TIME}" "${RESET}"
+    done
+}
+
 function pick_session() {
     require fzf
 
-    local LINE
-    # --tmux opens a popup inside tmux and falls back to the normal layout outside it
-    LINE="$(
-        cmd_list | fzf \
-            --tmux 80%,90% \
-            --no-bold \
-            --no-sort \
-            --ansi \
-            --border-label ' claude-session ' \
-            --prompt '> ' \
-            --header-lines 1 \
-            --bind 'tab:down,shift-tab:up' \
-            --preview-window 'down:60%' \
-            --preview "\"${SELF}\" show {1}"
-    )"
+    # popup width and preview width in percentage, the row layout of picker_rows depends on them
+    local POPUP=80 PREVIEW=50
+    local TOTAL
 
-    [[ -n "${LINE}" ]] || exit 1
+    if [[ -n "${TMUX}" ]]; then
+        # --tmux opens a popup of the window size, its border and fzf margin take 4 columns
+        TOTAL=$(($(tmux display-message -p '#{window_width}') * POPUP / 100 - 4))
+    else
+        # fzf takes the whole terminal outside tmux
+        TOTAL="$(stty size < /dev/tty 2> /dev/null | cut -d' ' -f2)"
+        TOTAL="${TOTAL:-80}"
+    fi
 
-    awk '{print $1}' <<< "${LINE}"
+    # list border, padding, pointer and gutter take 7 columns, 1 more for rounding of the preview width
+    local WIDTH=$((TOTAL - TOTAL * PREVIEW / 100 - 8))
+
+    # same layout as telescope: results above prompt on the left, preview on the right
+    picker_rows "${WIDTH}" | fzf \
+        --tmux "${POPUP}%,90%" \
+        --no-bold \
+        --no-sort \
+        --ansi \
+        --cycle \
+        --delimiter '\t' \
+        --with-nth 2 \
+        --accept-nth 1 \
+        --prompt '> ' \
+        --pointer '>' \
+        --gutter ' ' \
+        --info inline-right \
+        --list-border rounded \
+        --list-label ' Sessions ' \
+        --input-border rounded \
+        --input-label ' claude-session ' \
+        --preview-label ' Preview ' \
+        --preview-window "right:${PREVIEW}%:wrap" \
+        --preview "\"${SELF}\" show {1}" \
+        --bind 'tab:down,shift-tab:up' \
+        --bind 'ctrl-j:preview-half-page-down,ctrl-k:preview-half-page-up'
 }
 
 # Resolve an id (or prefix) to its jsonl file. Picks interactively when empty.
@@ -226,35 +361,31 @@ function cmd_list() {
     done
 
     local COUNT=0
+    local ID MTIME PROMPT RUN CWD TITLE
 
     printf '%-36s  %-16s  %5s  %-3s  %-40s  %s\n' "ID" "MODIFIED" "MSGS" "RUN" "DIRECTORY" "TITLE"
 
-    while read -r FILE; do
-        local ID CWD
-        ID="$(basename "${FILE}" .jsonl)"
-        CWD="$(session_cwd "${FILE}")"
-
-        if [[ ${HERE} == 1 && "${CWD}" != "${PWD}" ]]; then
-            continue
+    while IFS=$'\x1f' read -r ID MTIME PROMPT RUN CWD TITLE; do
+        if [[ ${RUN} == 1 ]]; then
+            RUN="*"
+        else
+            RUN=""
         fi
 
-        local RUN=""
-        session_pid "${ID}" > /dev/null && RUN="*"
-
-        printf '%-36s  %-16s  %5s  %-3s  %-40s  %s\n' \
+        printf '%-36s  %(%Y-%m-%d %H:%M)T  %5s  %-3s  %-40s  %s\n' \
             "${ID}" \
-            "$(date -d "@$(stat -c %Y "${FILE}")" '+%Y-%m-%d %H:%M')" \
-            "$(session_prompts "${FILE}")" \
+            "${MTIME}" \
+            "${PROMPT}" \
             "${RUN}" \
             "${CWD/#${HOME}/\~}" \
-            "$(session_title "${FILE}")"
+            "${TITLE}"
 
         COUNT=$((COUNT + 1))
 
         if [[ ${LIMIT} -gt 0 && ${COUNT} -ge ${LIMIT} ]]; then
             break
         fi
-    done < <(session_files)
+    done < <(session_rows "${HERE}")
 }
 
 function cmd_show() {
