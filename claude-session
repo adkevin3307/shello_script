@@ -261,8 +261,21 @@ function picker_rows() {
     done
 }
 
+# Pick a session with fzf and print its id. In "delete" mode (inside tmux only), Enter asks for confirmation
+# in a popup on top of the picker, the picker goes on when the answer is no.
 function pick_session() {
     require fzf
+
+    local MODE="$1"
+    local BINDS=()
+
+    if [[ ${MODE} == delete ]]; then
+        # show on the list border why a running session can not be deleted, until the cursor moves
+        BINDS=(
+            --bind "enter:transform(\"${SELF}\" __confirm-delete {1} 2> /dev/null)"
+            --bind 'focus:change-list-label( Sessions )'
+        )
+    fi
 
     # popup width and preview width in percentage, the row layout of picker_rows depends on them
     local POPUP=80 PREVIEW=50
@@ -302,7 +315,8 @@ function pick_session() {
         --preview-window "right:${PREVIEW}%:wrap" \
         --preview "\"${SELF}\" show {1}" \
         --bind 'tab:down,shift-tab:up' \
-        --bind 'ctrl-j:preview-half-page-down,ctrl-k:preview-half-page-up'
+        --bind 'ctrl-j:preview-half-page-down,ctrl-k:preview-half-page-up' \
+        "${BINDS[@]}"
 }
 
 # Resolve an id (or prefix) to its jsonl file. Picks interactively when empty.
@@ -531,6 +545,76 @@ function cmd_rename() {
     echo "Renamed ${ID} to \"${NAME}\"."
 }
 
+# Ask whether to delete the session files, in a popup inside tmux. Return 0 when the answer is yes.
+function confirm_delete() {
+    local FILES=("$@")
+    local HEADER="Delete the following sessions?"$'\n'
+    local WIDTH=40
+    local FILE
+
+    for FILE in "${FILES[@]}"; do
+        local TITLE LINE LENGTH
+        TITLE="$(session_title "${FILE}")"
+
+        if [[ "$(display_width "${TITLE}")" -gt 60 ]]; then
+            TITLE="$(fit 60 "${TITLE}")"
+        fi
+
+        LINE="  $(basename "${FILE}" .jsonl | cut -c1-8)  ${TITLE}"
+        LENGTH="$(display_width "${LINE}")"
+        HEADER+=$'\n'"${LINE}"
+
+        if [[ $((LENGTH + 12)) -gt ${WIDTH} ]]; then
+            WIDTH=$((LENGTH + 12))
+        fi
+    done
+
+    local ANSWER
+
+    if command -v fzf > /dev/null; then
+        # height: popup border 2 + fzf border 2 + header (question, blank, sessions) + separator 1 + 2 options
+        ANSWER="$(
+            printf 'No\nYes\n' | fzf \
+                --tmux "${WIDTH},$((${#FILES[@]} + 9))" \
+                --no-bold \
+                --no-sort \
+                --ansi \
+                --border-label ' claude-session ' \
+                --layout reverse \
+                --no-input \
+                --no-info \
+                --header "${HEADER}" \
+                --header-border line \
+                --pointer '▶' \
+                --gutter ' ' \
+                --bind 'tab:down,shift-tab:up' \
+                --bind 'y:pos(2)+accept,n:pos(1)+accept'
+        )"
+    else
+        echo "${HEADER}"
+        read -r -p "Continue? [y/N] " ANSWER
+    fi
+
+    [[ "${ANSWER}" =~ ^([Yy]|Yes)$ ]]
+}
+
+# Run by Enter of the picker in delete mode: confirm on top of the picker and print the fzf action for the answer.
+function cmd_confirm_delete() {
+    local FILE ID
+
+    # nothing is focused when the list is empty
+    [[ -n "$1" ]] || exit 0
+
+    FILE="$(resolve_session "$1")" || exit 0
+    ID="$(basename "${FILE}" .jsonl)"
+
+    if session_pid "${ID}" > /dev/null; then
+        echo "change-list-label( Session ${ID:0:8} is running, close it first )"
+    elif confirm_delete "${FILE}"; then
+        echo "accept"
+    fi
+}
+
 function cmd_delete() {
     local YES=0
     local HISTORY=0
@@ -562,7 +646,19 @@ function cmd_delete() {
     done
 
     if [[ ${#IDS[@]} -eq 0 ]]; then
-        IDS=("")
+        local MODE="" PICKED
+
+        # inside tmux the picker asks for confirmation on top of itself
+        if [[ ${YES} == 0 && -n "${TMUX}" ]]; then
+            MODE="delete"
+        fi
+
+        PICKED="$(pick_session "${MODE}")" || exit 1
+        IDS=("${PICKED}")
+
+        if [[ ${MODE} == delete ]]; then
+            YES=1
+        fi
     fi
 
     local FILES=()
@@ -584,53 +680,7 @@ function cmd_delete() {
     [[ ${#FILES[@]} -gt 0 ]] || exit 1
 
     if [[ ${YES} == 0 ]]; then
-        local HEADER="Delete the following sessions?"$'\n'
-        local WIDTH=40
-
-        for FILE in "${FILES[@]}"; do
-            local TITLE LINE LENGTH
-            TITLE="$(session_title "${FILE}")"
-
-            if [[ "$(display_width "${TITLE}")" -gt 60 ]]; then
-                TITLE="$(fit 60 "${TITLE}")"
-            fi
-
-            LINE="  $(basename "${FILE}" .jsonl | cut -c1-8)  ${TITLE}"
-            LENGTH="$(display_width "${LINE}")"
-            HEADER+=$'\n'"${LINE}"
-
-            if [[ $((LENGTH + 12)) -gt ${WIDTH} ]]; then
-                WIDTH=$((LENGTH + 12))
-            fi
-        done
-
-        local ANSWER
-
-        if command -v fzf > /dev/null; then
-            # height: popup border 2 + fzf border 2 + header (question, blank, sessions) + separator 1 + 2 options
-            ANSWER="$(
-                printf 'No\nYes\n' | fzf \
-                    --tmux "${WIDTH},$((${#FILES[@]} + 9))" \
-                    --no-bold \
-                    --no-sort \
-                    --ansi \
-                    --border-label ' claude-session ' \
-                    --layout reverse \
-                    --no-input \
-                    --no-info \
-                    --header "${HEADER}" \
-                    --header-border line \
-                    --pointer '▶' \
-                    --gutter ' ' \
-                    --bind 'tab:down,shift-tab:up' \
-                    --bind 'y:pos(2)+accept,n:pos(1)+accept'
-            )"
-        else
-            echo "${HEADER}"
-            read -r -p "Continue? [y/N] " ANSWER
-        fi
-
-        [[ "${ANSWER}" =~ ^([Yy]|Yes)$ ]] || exit 1
+        confirm_delete "${FILES[@]}" || exit 1
     fi
 
     for FILE in "${FILES[@]}"; do
@@ -683,6 +733,10 @@ rename | mv)
     ;;
 delete | rm)
     cmd_delete "$@"
+    ;;
+__confirm-delete)
+    # internal, run by the picker of delete
+    cmd_confirm_delete "$@"
     ;;
 "" | -h | --help | help)
     HELP
